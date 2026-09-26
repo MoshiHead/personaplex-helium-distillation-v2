@@ -1,0 +1,10 @@
+# distill/ is not pip-installed as a package (it's a sibling of moshi/, imported via sys.path --
+# see moshi/moshi/models/loaders.py's get_student_lm() and conftest.py). This just documents
+# its extra dependencies beyond what `pip install moshi/.` already provides.
+pyyaml>=6.0
+pytest>=7.0
+
+# Eval-only (distill/eval.py) -- imported lazily, not required for training/inference:
+transformers>=4.40   # WhisperWER, WavLMSpeakerSimilarity
+soundfile
+speechmos             # UTMOSPredictor; skip this metric if install fails on your platform

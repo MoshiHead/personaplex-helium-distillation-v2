@@ -1,0 +1,39 @@
+# Ablation floor only -- smaller/faster student to bound how far distillation can be
+# pushed before quality collapses. Not the default target size.
+name: student_ppx_xs
+
+num_hidden_layers: 14
+hidden_size: 1536
+intermediate_size: 4096
+num_attention_heads: 12      # head_dim = 1536 / 12 = 128
+num_key_value_heads: 4       # GQA 3:1 (12 query heads / 4 groups of 3)
+rope_theta: 10000
+max_frames: 1500
+norm: rms_norm_f32
+gating: silu
+layer_scale: null
+causal: true
+
+init:
+  num_calibration_batches: 32
+  keep_first: 2
+  keep_last: 2
+
+teacher_reference:
+  dim: 4096
+  num_heads: 32
+  num_layers: 32
+  context: 3000
+  n_q: 16
+  dep_q: 16
+  card: 2048
+  text_card: 32000
+  depformer_dim: 1024
+  depformer_num_heads: 16
+  depformer_num_layers: 6
+  depformer_dim_feedforward: 4224
+  max_period: 10000
+
+bridge:
+  in_dim: 1536
+  out_dim: 4096

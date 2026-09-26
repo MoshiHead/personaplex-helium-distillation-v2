@@ -1,0 +1,55 @@
+# Student temporal transformer ("S" size). Everything under `teacher:` and `bridge:`
+# documents the frozen interface this student must plug into -- it does not
+# re-instantiate those modules, it loads them verbatim from the teacher checkpoint.
+#
+# NOTE on the numbers below vs. an earlier draft of this config: the teacher's real
+# temporal-transformer context is 3000 frames (not 4096), and the teacher has no GQA
+# (num_key_value_heads == num_heads == 32, plain MHA) -- see distill/init_from_teacher.py
+# for how GQA and the width reduction are actually derived from a plain-MHA teacher.
+name: student_ppx_s
+
+num_hidden_layers: 20
+hidden_size: 2048
+intermediate_size: 5632      # dim_feedforward fed to the gated FFN; actual SwiGLU hidden
+                              # width is (2 * intermediate_size) // 3, per moshi/modules/gating.py
+num_attention_heads: 16      # query heads; head_dim = hidden_size / num_attention_heads = 128
+num_key_value_heads: 4       # GQA 4:1 (16 query heads / 4 groups of 4)
+rope_theta: 10000            # copied verbatim from the teacher's max_period
+max_frames: 1500             # student attention context cap (half the teacher's real 3000)
+norm: rms_norm_f32
+gating: silu
+layer_scale: null
+causal: true
+
+# Layer-selection / init hyperparameters consumed by distill/init_from_teacher.py
+init:
+  num_calibration_batches: 32
+  keep_first: 3
+  keep_last: 3
+
+# Reference dimensions of the FROZEN components this student reuses as-is from the
+# teacher checkpoint (depformer, output heads, embeddings stay teacher-shaped; Mimi is
+# untouched). These are documentation only -- loaders.py reads the real shapes off the
+# teacher state dict, it does not trust these numbers.
+teacher_reference:
+  dim: 4096
+  num_heads: 32
+  num_layers: 32
+  context: 3000
+  n_q: 16
+  dep_q: 16
+  card: 2048
+  text_card: 32000
+  depformer_dim: 1024
+  depformer_num_heads: 16
+  depformer_num_layers: 6
+  depformer_dim_feedforward: 4224
+  max_period: 10000
+
+# Bridge: Linear(hidden_size -> bridge.out_dim) + RMSNorm, new & learned.
+# out_dim == teacher_reference.dim: the bridge stands in for the teacher's
+# post-transformer, pre-out_norm hidden state, so the frozen out_norm / text_linear /
+# depformer_in / depformer / linears chain downstream is reused completely unmodified.
+bridge:
+  in_dim: 2048
+  out_dim: 4096
