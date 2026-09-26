@@ -184,10 +184,15 @@ def masked_ce(logits, targets, mask):
 
 
 def hidden_term(projected: torch.Tensor, teacher_hidden: torch.Tensor) -> torch.Tensor:
-    """== distill.losses.hidden_loss on already-projected student states: L2-normalize, MSE + (1 - cosine)."""
+    """== distill.losses.hidden_loss on already-projected student states (L2-normalize, MSE + (1 - cosine)), in a
+    memory-lean form. For unit vectors p, t in R^D: MSE = mean_pos(|p - t|^2) / D = 2 (1 - mean_pos(p.t)) / D and
+    cosine = p.t, so the loss is (1 + 2/D) * (1 - mean_pos(p.t)). Same value, far fewer fp32 [B, T, 4096]
+    intermediates kept for backward (x 20 layers this was a large share of activation memory)."""
     p = F.normalize(projected.float(), dim=-1)
-    t = F.normalize(teacher_hidden.float(), dim=-1)
-    return F.mse_loss(p, t) + (1.0 - F.cosine_similarity(p, t, dim=-1).mean())
+    with torch.no_grad():
+        t = F.normalize(teacher_hidden.float(), dim=-1)
+    dot = (p * t).sum(dim=-1).mean()
+    return (1.0 + 2.0 / p.shape[-1]) * (1.0 - dot)
 
 
 def loss_terms(s_out: dict, t_cap: ForwardCapture, codes: torch.Tensor, transition_mask: torch.Tensor,
@@ -447,7 +452,13 @@ def load_teacher(args, device) -> LMModel:
         # that with a trailing .to() -- do the same here.
         teacher = teacher.to(device=device, dtype=torch.bfloat16)
     else:
-        teacher = loaders.get_moshi_lm(args.teacher_checkpoint, device=device, dtype=torch.bfloat16)
+        # Load on CPU, then move to THIS rank's GPU. get_moshi_lm(device=cuda:N) calls safetensors'
+        # load_file(device="cuda") without the index, which safetensors maps to cuda:0 -- under DDP every rank would
+        # first put the whole 16.7 GB teacher on GPU 0 (and the caching allocator keeps it there): OOM on rank 0.
+        teacher = loaders.get_moshi_lm(args.teacher_checkpoint, device="cpu", dtype=torch.bfloat16)
+        teacher = teacher.to(device)
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
     teacher.eval()
     for p in teacher.parameters():
         p.requires_grad = False
@@ -671,6 +682,13 @@ def train(args):
     # find_unused_parameters is required from then on.
     model = wrap_ddp(find_unused=depformer_unfrozen and not args.distill_user_stream)
 
+    if di.device.type == "cuda":
+        free_b, total_b = torch.cuda.mem_get_info(di.device)
+        static = {"device": str(di.device), "allocated_gb": round(torch.cuda.memory_allocated(di.device) / 1e9, 2),
+                  "reserved_gb": round(torch.cuda.memory_reserved(di.device) / 1e9, 2),
+                  "device_free_gb": round(free_b / 1e9, 2), "device_total_gb": round(total_b / 1e9, 2)}
+        logger.info("static GPU memory after model setup: %s", json.dumps(static))
+        rl.event("static_memory_rank0", **static)
     trainable = [p for g in optimizer.param_groups for p in g["params"]]
     n_params = {"student_trainable": sum(p.numel() for p in student.parameters() if p.requires_grad),
                 "hidden_projections": sum(p.numel() for p in projections.parameters()),
