@@ -20,6 +20,7 @@ import typing as tp
 
 import torch
 import torch.nn as nn
+import torch.utils.checkpoint
 from torch.nn import functional as F
 
 from moshi.modules.streaming import StreamingModule
@@ -340,9 +341,20 @@ class GQAStreamingTransformer(StreamingModule[_GQATransformerState]):
         device = next(self.parameters()).device
         return _GQATransformerState(offset=torch.zeros(1, device=device, dtype=torch.long))
 
+    # Set by distill/train.py (--grad-checkpointing). Only used for full-sequence training forwards: never while
+    # streaming (LMGen / inference), never in eval mode.
+    gradient_checkpointing: bool = False
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        use_ckpt = self.gradient_checkpointing and self.training and self._streaming_state is None \
+            and torch.is_grad_enabled()
         for layer in self.layers:
-            x = layer(x)
+            if use_ckpt:
+                # non-reentrant: forward hooks (train.py captures per-layer outputs for L_hidden) and autocast
+                # behave exactly as without checkpointing; activations are recomputed in backward.
+                x = torch.utils.checkpoint.checkpoint(layer, x, use_reentrant=False)
+            else:
+                x = layer(x)
         state = self._streaming_state
         if state is not None:
             state.offset.add_(x.shape[1])

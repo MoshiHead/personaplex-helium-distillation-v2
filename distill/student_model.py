@@ -177,6 +177,7 @@ def build_student_lm(
     teacher_checkpoint: tp.Union[str, Path],
     device: tp.Union[str, torch.device] = "cpu",
     dtype: torch.dtype = torch.bfloat16,
+    teacher_kwargs: tp.Optional[dict] = None,
 ) -> StudentLMModel:
     """Build a `StudentLMModel` with freshly-initialized (untrained) student-scale
     modules and the frozen teacher submodules loaded in. This is the *structural*
@@ -188,7 +189,8 @@ def build_student_lm(
     if isinstance(student_config, str):
         student_config = load_student_config(student_config)
 
-    model = StudentLMModel(student_config, device=device, dtype=dtype)
+    # teacher_kwargs: only for tests with a tiny synthetic teacher; None = the real PersonaPlex-7B layout.
+    model = StudentLMModel(student_config, device=device, dtype=dtype, teacher_kwargs=teacher_kwargs)
 
     teacher_checkpoint = str(teacher_checkpoint)
     if teacher_checkpoint.endswith(".safetensors"):

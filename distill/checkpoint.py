@@ -20,9 +20,13 @@ import torch
 from .student_model import StudentLMModel, FROZEN_PREFIXES
 
 
-def trainable_state_dict(model: StudentLMModel) -> dict[str, torch.Tensor]:
+def trainable_state_dict(model: StudentLMModel, include_depformer: bool = False) -> dict[str, torch.Tensor]:
+    """The student's own weights (transformer, embeddings, bridge). With include_depformer=True also the depth
+    transformer (`depformer.*`), which Phase 4 fine-tunes -- without it those P4 updates would be lost. The other
+    frozen teacher parts (depformer_in/emb, linears, text_linear, out_norm) are never trained and never saved."""
     full = model.state_dict()
-    return {k: v for k, v in full.items() if not k.startswith(FROZEN_PREFIXES)}
+    return {k: v for k, v in full.items()
+            if not k.startswith(FROZEN_PREFIXES) or (include_depformer and k.startswith("depformer."))}
 
 
 def load_trainable_state_dict(model: StudentLMModel, state_dict: dict[str, torch.Tensor]):
@@ -101,3 +105,39 @@ def load(
     random.setstate(rng["python"])
 
     return payload
+
+
+# --------------------------------------------------------------------------------------------------------------
+# Full training state (used by distill/train.py). Everything needed to resume bit-for-bit in data order and
+# optimizer state; RNG streams are re-derived from (seed, step, rank) by the trainer, so they need no saving.
+# --------------------------------------------------------------------------------------------------------------
+def save_training_state(path: str, *, step: int, student: StudentLMModel, hidden_projections: torch.nn.Module,
+                        optimizer: torch.optim.Optimizer, lr_scheduler, schedule_state: dict,
+                        running_norm_states: dict, selected_teacher_layers: list[int], depformer_trained: bool,
+                        train_args: dict, extra: tp.Optional[dict] = None):
+    """Atomic save (write to .tmp, then rename) so a crash mid-save never corrupts the last good checkpoint."""
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "format": "ppx_student_train_v2",
+        "step": step,
+        "student_config_name": student.student_config.name,
+        # stored in the TRAINING dtype (fp32 master weights when --master-dtype fp32) for an exact resume
+        "student_state_dict": trainable_state_dict(student, include_depformer=depformer_trained),
+        "depformer_trained": depformer_trained,
+        "hidden_projections_state_dict": hidden_projections.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "lr_scheduler_state_dict": lr_scheduler.state_dict(),
+        "schedule_state": schedule_state,
+        "running_norm_states": running_norm_states,
+        "selected_teacher_layers": selected_teacher_layers,
+        "train_args": train_args,
+        "extra": extra or {},
+    }
+    tmp_path = f"{path}.tmp"
+    torch.save(payload, tmp_path)
+    Path(tmp_path).replace(path)
+
+
+def load_training_payload(path: str) -> dict:
+    # weights_only=False: our own checkpoints (python dicts / numbers alongside tensors)
+    return torch.load(path, map_location="cpu", weights_only=False)

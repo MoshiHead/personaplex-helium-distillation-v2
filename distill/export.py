@@ -30,12 +30,18 @@ from .checkpoint import trainable_state_dict
 from .student_model import StudentLMModel
 
 
-def export_bf16(student: StudentLMModel, output_path: str, selected_teacher_layers: list[int]):
-    state_dict = {k: v.to(torch.bfloat16) for k, v in trainable_state_dict(student).items()}
+def export_bf16(student: StudentLMModel, output_path: str, selected_teacher_layers: list[int],
+                include_depformer: bool = False):
+    """include_depformer=True when Phase 4 fine-tuned the depth transformer: those weights then ship in the export
+    and `load_export` (strict=False load into a model built from the teacher checkpoint) overrides the teacher's
+    frozen copy with them. Without it the P4 depformer updates would silently be lost."""
+    state_dict = {k: v.to(torch.bfloat16)
+                  for k, v in trainable_state_dict(student, include_depformer=include_depformer).items()}
     metadata = {
         "student_config_name": student.student_config.name,
         "selected_teacher_layers": json.dumps(selected_teacher_layers),
         "quantization": "none",
+        "depformer_included": str(bool(include_depformer)),
     }
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     save_file(state_dict, output_path, metadata=metadata)
@@ -47,6 +53,7 @@ def export_awq_int4(
     output_path: str,
     selected_teacher_layers: list[int],
     group_size: int = 128,
+    include_depformer: bool = False,
 ):
     quantized = quantize_student_temporal_transformer(student, calibration_inputs, group_size=group_size)
 
@@ -59,7 +66,7 @@ def export_awq_int4(
         state_dict[f"{prefix}.awq_scale"] = q.awq_scale.to(torch.bfloat16)
 
     non_quantized_prefixes = tuple(f".{n}.weight" for n in TEMPORAL_LINEAR_NAMES)
-    for k, v in trainable_state_dict(student).items():
+    for k, v in trainable_state_dict(student, include_depformer=include_depformer).items():
         if k.startswith("transformer.") and k.endswith(non_quantized_prefixes):
             continue  # replaced by the quantized tensors above
         state_dict[k] = v.to(torch.bfloat16)
@@ -69,6 +76,7 @@ def export_awq_int4(
         "selected_teacher_layers": json.dumps(selected_teacher_layers),
         "quantization": "awq_int4_temporal_linears_only",
         "group_size": str(group_size),
+        "depformer_included": str(bool(include_depformer)),
     }
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     save_file(state_dict, output_path, metadata=metadata)
